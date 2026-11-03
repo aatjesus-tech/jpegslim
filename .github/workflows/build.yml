@@ -1,0 +1,27 @@
+name: Gerar JPEGSlim.exe
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: python -m pip install -r requirements.txt
+
+      - name: Gerar executavel
+        run: python -m PyInstaller --onefile --windowed --name JPEGSlim jpegslim.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: JPEGSlim-windows
+          path: dist/JPEGSlim.exe
