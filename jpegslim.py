@@ -170,132 +170,354 @@ def run_cli(args):
 
 
 # ------------------------------------------------------------------ GUI ----
-def run_gui():
-    import tkinter as tk
+ACCENT = "#7c5cff"
+ACCENT_HOVER = "#6a49f0"
+BG = "#0e1016"
+CARD = "#171a23"
+CARD_2 = "#1e2230"
+TEXT_DIM = "#8b93a7"
+GREEN = "#34d399"
+RED = "#f87171"
+
+
+def build_app():
+    import queue
     from tkinter import filedialog, messagebox, ttk
 
-    root = tk.Tk()
-    root.title("JPEGSlim")
-    root.geometry("820x520")
+    import customtkinter as ctk
 
-    files, state = [], {"out": "", "running": False}
-    level = tk.StringVar(value="high")
-    mode = tk.StringVar(value="suffix")
-    keep = tk.BooleanVar(value=True)
+    try:
+        from tkinterdnd2 import DND_FILES, TkinterDnD
+        have_dnd = True
+    except Exception:  # sem arrastar-e-soltar, o app continua funcionando
+        have_dnd = False
 
-    top = ttk.Frame(root, padding=8)
-    top.pack(fill="x")
-    cols = ("nome", "antes", "depois", "economia", "q", "status")
-    tree = ttk.Treeview(root, columns=cols, show="headings", height=12)
-    for c, w in zip(cols, (300, 90, 90, 90, 50, 150)):
-        tree.heading(c, text=c.capitalize())
-        tree.column(c, width=w, anchor="w" if c == "nome" else "center")
-    tree.pack(fill="both", expand=True, padx=8)
+    ctk.set_appearance_mode("dark")
+    ctk.set_default_color_theme("blue")
 
-    def add(paths):
-        new = [f for f in collect(paths) if f not in files]
-        for f in new:
-            files.append(f)
-            tree.insert("", "end", iid=str(f),
-                        values=(f.name, human(f.stat().st_size), "", "", "", "Na fila"))
+    if have_dnd:
+        class Root(ctk.CTk, TkinterDnD.DnDWrapper):
+            def __init__(self):
+                super().__init__()
+                self.TkdndVersion = TkinterDnD._require(self)
+    else:
+        Root = ctk.CTk
 
-    def add_files():
-        add(filedialog.askopenfilenames(
-            filetypes=[("JPEG", "*.jpg *.jpeg *.jpe")]))
+    class App(Root):
+        LEVEL_LABELS = {"Média": "medium", "Alta": "high", "Ultra": "ultra"}
+        OUT_SUFFIX = "Salvar ao lado (_opt)"
+        OUT_OVER = "Substituir originais"
+        OUT_FOLDER = "Escolher pasta..."
 
-    def add_folder():
-        d = filedialog.askdirectory()
-        if d:
-            add([d])
+        def __init__(self):
+            super().__init__()
+            self.title("JPEGSlim")
+            self.geometry("900x700")
+            self.minsize(780, 620)
+            self.configure(fg_color=BG)
 
-    def clear():
-        if not state["running"]:
-            files.clear()
-            tree.delete(*tree.get_children())
+            self.files = []          # Path
+            self.done = set()        # Path ja processados
+            self.out_dir = None
+            self.running = False
+            self.q = queue.Queue()
+            self.acc = {"b": 0, "a": 0}
+            self.total_todo = 0
+            self.total_done = 0
 
-    def pick_out():
-        d = filedialog.askdirectory()
-        if d:
-            state["out"] = d
-            mode.set("folder")
-            out_lbl.config(text=d)
+            self._build_ui()
+            self.after(100, self._poll)
 
-    ttk.Button(top, text="Adicionar fotos", command=add_files).pack(side="left")
-    ttk.Button(top, text="Adicionar pasta", command=add_folder).pack(side="left", padx=4)
-    ttk.Button(top, text="Limpar", command=clear).pack(side="left")
+        # ---------------------------------------------------------- UI ----
+        def _build_ui(self):
+            head = ctk.CTkFrame(self, fg_color="transparent")
+            head.pack(fill="x", padx=28, pady=(22, 8))
+            ctk.CTkLabel(head, text="JPEGSlim",
+                         font=ctk.CTkFont(size=28, weight="bold")).pack(side="left")
+            ctk.CTkLabel(head, text="  Fotos mais leves, sem perda visível",
+                         font=ctk.CTkFont(size=14), text_color=TEXT_DIM).pack(
+                side="left", pady=(10, 0))
 
-    opt = ttk.LabelFrame(root, text="Opcoes", padding=8)
-    opt.pack(fill="x", padx=8, pady=6)
-    ttk.Label(opt, text="Qualidade:").grid(row=0, column=0, sticky="w")
-    for i, (k, t) in enumerate((("medium", "Media (menor arquivo)"),
-                                ("high", "Alta"), ("ultra", "Ultra (mais fiel)"))):
-        ttk.Radiobutton(opt, text=t, value=k, variable=level).grid(row=0, column=i + 1, padx=6)
-    ttk.Label(opt, text="Saida:").grid(row=1, column=0, sticky="w")
-    ttk.Radiobutton(opt, text="Sufixo _opt ao lado", value="suffix", variable=mode).grid(row=1, column=1)
-    ttk.Radiobutton(opt, text="Substituir originais", value="over", variable=mode).grid(row=1, column=2)
-    ttk.Radiobutton(opt, text="Outra pasta:", value="folder", variable=mode).grid(row=1, column=3)
-    ttk.Button(opt, text="Escolher...", command=pick_out).grid(row=1, column=4)
-    out_lbl = ttk.Label(opt, text="")
-    out_lbl.grid(row=2, column=1, columnspan=4, sticky="w")
-    ttk.Checkbutton(opt, text="Manter EXIF/ICC", variable=keep).grid(row=0, column=4)
+            # zona de soltar
+            self.zone = ctk.CTkFrame(self, fg_color=CARD, corner_radius=18,
+                                     border_width=2, border_color=ACCENT, height=130)
+            self.zone.pack(fill="x", padx=28, pady=8)
+            self.zone.pack_propagate(False)
+            self.zone_title = ctk.CTkLabel(
+                self.zone, text="Arraste suas fotos ou pastas aqui",
+                font=ctk.CTkFont(size=18, weight="bold"))
+            self.zone_title.pack(pady=(26, 2))
+            self.zone_sub = ctk.CTkLabel(
+                self.zone,
+                text="ou clique para escolher  •  JPG / JPEG" if have_dnd else
+                     "Clique para escolher as fotos  •  JPG / JPEG",
+                text_color=TEXT_DIM)
+            self.zone_sub.pack()
+            for w in (self.zone, self.zone_title, self.zone_sub):
+                w.bind("<Button-1>", lambda e: self.pick_files())
+                w.configure(cursor="hand2") if w is self.zone else None
 
-    bar = ttk.Progressbar(root)
-    bar.pack(fill="x", padx=8)
-    total_lbl = ttk.Label(root, text="")
-    total_lbl.pack(anchor="w", padx=8)
+            # barra de acoes da lista
+            bar = ctk.CTkFrame(self, fg_color="transparent")
+            bar.pack(fill="x", padx=28, pady=(6, 0))
+            self.count_lbl = ctk.CTkLabel(bar, text="Nenhuma foto na fila",
+                                          text_color=TEXT_DIM)
+            self.count_lbl.pack(side="left")
+            ctk.CTkButton(bar, text="Limpar", width=80, height=28, fg_color=CARD_2,
+                          hover_color="#2a3045", command=self.clear).pack(side="right")
+            ctk.CTkButton(bar, text="+ Pasta", width=80, height=28, fg_color=CARD_2,
+                          hover_color="#2a3045", command=self.pick_folder).pack(
+                side="right", padx=6)
 
-    def start():
-        if state["running"] or not files:
-            return
-        if mode.get() == "over" and not messagebox.askyesno(
-                "Confirmar", "Os originais serao substituidos. Continuar?"):
-            return
-        if mode.get() == "folder" and not state["out"]:
-            messagebox.showwarning("Saida", "Escolha a pasta de saida.")
-            return
-        state["running"] = True
-        target = LEVELS[level.get()]
-        bar["maximum"], bar["value"] = len(files), 0
-        acc = {"b": 0, "a": 0}
-        lock = threading.Lock()
+            # lista
+            box = ctk.CTkFrame(self, fg_color=CARD, corner_radius=14)
+            box.pack(fill="both", expand=True, padx=28, pady=8)
+            style = ttk.Style()
+            style.theme_use("clam")
+            style.configure("J.Treeview", background=CARD, fieldbackground=CARD,
+                            foreground="#e6e9f2", rowheight=30, borderwidth=0,
+                            font=("Segoe UI", 10))
+            style.configure("J.Treeview.Heading", background=CARD_2,
+                            foreground=TEXT_DIM, borderwidth=0, relief="flat",
+                            font=("Segoe UI", 9, "bold"))
+            style.map("J.Treeview", background=[("selected", "#2a2f45")])
+            style.map("J.Treeview.Heading", background=[("active", CARD_2)])
+            style.configure("Vertical.TScrollbar", background=CARD_2,
+                            troughcolor=CARD, borderwidth=0, arrowcolor=TEXT_DIM)
+            cols = ("nome", "antes", "depois", "eco", "status")
+            self.tree = ttk.Treeview(box, columns=cols, show="headings",
+                                     style="J.Treeview", selectmode="extended")
+            heads = (("nome", "Arquivo", 330, "w"), ("antes", "Antes", 90, "center"),
+                     ("depois", "Depois", 90, "center"),
+                     ("eco", "Economia", 90, "center"), ("status", "Status", 170, "center"))
+            for c, t, w, a in heads:
+                self.tree.heading(c, text=t)
+                self.tree.column(c, width=w, anchor=a, stretch=(c == "nome"))
+            sb = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview)
+            self.tree.configure(yscrollcommand=sb.set)
+            sb.pack(side="right", fill="y", padx=(0, 4), pady=6)
+            self.tree.pack(fill="both", expand=True, padx=(8, 0), pady=6)
+            self.tree.tag_configure("ok", foreground=GREEN)
+            self.tree.tag_configure("err", foreground=RED)
+            self.tree.bind("<Delete>", lambda e: self.remove_selected())
 
-        def dest(f):
-            if mode.get() == "over":
+            # opcoes
+            opt = ctk.CTkFrame(self, fg_color=CARD, corner_radius=14)
+            opt.pack(fill="x", padx=28, pady=(0, 8))
+            ctk.CTkLabel(opt, text="Qualidade", text_color=TEXT_DIM).grid(
+                row=0, column=0, padx=(16, 8), pady=(12, 0), sticky="w")
+            ctk.CTkLabel(opt, text="Saída", text_color=TEXT_DIM).grid(
+                row=0, column=1, padx=8, pady=(12, 0), sticky="w")
+            self.level = ctk.CTkSegmentedButton(
+                opt, values=list(self.LEVEL_LABELS), selected_color=ACCENT,
+                selected_hover_color=ACCENT_HOVER, fg_color=CARD_2)
+            self.level.set("Alta")
+            self.level.grid(row=1, column=0, padx=(16, 8), pady=(4, 14), sticky="w")
+            self.out_menu = ctk.CTkOptionMenu(
+                opt, values=[self.OUT_SUFFIX, self.OUT_OVER, self.OUT_FOLDER],
+                command=self._out_changed, fg_color=CARD_2, button_color=CARD_2,
+                button_hover_color="#2a3045", width=210)
+            self.out_menu.set(self.OUT_SUFFIX)
+            self.out_menu.grid(row=1, column=1, padx=8, pady=(4, 14), sticky="w")
+            self.keep = ctk.CTkSwitch(opt, text="Manter EXIF / cores", progress_color=ACCENT)
+            self.keep.select()
+            self.keep.grid(row=1, column=2, padx=16, pady=(4, 14), sticky="e")
+            opt.grid_columnconfigure(2, weight=1)
+
+            # rodape
+            foot = ctk.CTkFrame(self, fg_color="transparent")
+            foot.pack(fill="x", padx=28, pady=(0, 22))
+            left = ctk.CTkFrame(foot, fg_color="transparent")
+            left.pack(side="left", fill="x", expand=True)
+            self.progress = ctk.CTkProgressBar(left, progress_color=ACCENT, height=10)
+            self.progress.set(0)
+            self.progress.pack(fill="x", padx=(0, 18), pady=(6, 6))
+            self.summary = ctk.CTkLabel(left, text="", anchor="w", text_color=TEXT_DIM)
+            self.summary.pack(fill="x")
+            self.btn = ctk.CTkButton(foot, text="Otimizar", width=170, height=46,
+                                     corner_radius=12, fg_color=ACCENT,
+                                     hover_color=ACCENT_HOVER,
+                                     font=ctk.CTkFont(size=16, weight="bold"),
+                                     command=self.start)
+            self.btn.pack(side="right")
+
+            if have_dnd:
+                for w in (self, self.zone, self.zone_title, self.zone_sub, self.tree):
+                    w.drop_target_register(DND_FILES)
+                    w.dnd_bind("<<Drop>>", self._on_drop)
+                    w.dnd_bind("<<DropEnter>>", lambda e: self.zone.configure(fg_color=CARD_2))
+                    w.dnd_bind("<<DropLeave>>", lambda e: self.zone.configure(fg_color=CARD))
+
+        # ------------------------------------------------------- fila ----
+        def _on_drop(self, event):
+            self.zone.configure(fg_color=CARD)
+            self.add_paths(self.tk.splitlist(event.data))
+            return event.action
+
+        def add_paths(self, paths):
+            if self.running:
+                return
+            n = 0
+            for f in collect(paths):
+                if f in self.files:
+                    continue
+                self.files.append(f)
+                try:
+                    size = human(f.stat().st_size)
+                except OSError:
+                    size = "?"
+                self.tree.insert("", "end", iid=str(f),
+                                 values=(f.name, size, "", "", "Na fila"))
+                n += 1
+            self._update_count()
+            return n
+
+        def _update_count(self):
+            pend = len([f for f in self.files if f not in self.done])
+            self.count_lbl.configure(
+                text=f"{pend} foto(s) na fila" if pend else "Nenhuma foto na fila")
+
+        def pick_files(self):
+            if self.running:
+                return
+            fs = filedialog.askopenfilenames(
+                title="Escolha as fotos",
+                filetypes=[("JPEG", "*.jpg *.jpeg *.jpe *.JPG *.JPEG")])
+            if fs:
+                self.add_paths(fs)
+
+        def pick_folder(self):
+            if self.running:
+                return
+            d = filedialog.askdirectory(title="Escolha uma pasta")
+            if d:
+                self.add_paths([d])
+
+        def remove_selected(self):
+            if self.running:
+                return
+            for iid in self.tree.selection():
+                p = Path(iid)
+                if p in self.files:
+                    self.files.remove(p)
+                self.done.discard(p)
+                self.tree.delete(iid)
+            self._update_count()
+
+        def clear(self):
+            if self.running:
+                return
+            self.files.clear()
+            self.done.clear()
+            self.tree.delete(*self.tree.get_children())
+            self.progress.set(0)
+            self.summary.configure(text="")
+            self._update_count()
+
+        def _out_changed(self, choice):
+            if choice == self.OUT_FOLDER:
+                d = filedialog.askdirectory(title="Pasta de saída")
+                if d:
+                    self.out_dir = Path(d)
+                    self.out_menu.set(f"Pasta: …{str(d)[-22:]}")
+                else:
+                    self.out_menu.set(self.OUT_SUFFIX)
+
+        def _dest(self, f):
+            cur = self.out_menu.get()
+            if cur == self.OUT_OVER:
                 return f
-            if mode.get() == "folder":
-                return Path(state["out"]) / f.name
+            if self.out_dir and cur.startswith("Pasta:"):
+                return self.out_dir / f.name
             return f.with_name(f.stem + "_opt" + f.suffix)
 
-        def work(f):
-            iid = str(f)
+        # --------------------------------------------------- processar ----
+        def start(self):
+            if self.running:
+                return
+            todo = [f for f in self.files if f not in self.done]
+            if not todo:
+                messagebox.showinfo("JPEGSlim", "Adicione fotos antes de otimizar.")
+                return
+            if self.out_menu.get() == self.OUT_OVER and not messagebox.askyesno(
+                    "Substituir originais",
+                    "Os arquivos originais serão substituídos pelas versões otimizadas.\n"
+                    "Deseja continuar?"):
+                return
+            self.running = True
+            self.btn.configure(state="disabled", text="Otimizando...")
+            target = LEVELS[self.LEVEL_LABELS[self.level.get()]]
+            keep = bool(self.keep.get())
+            self.acc = {"b": 0, "a": 0}
+            self.total_todo, self.total_done = len(todo), 0
+            self.progress.set(0)
+            self.summary.configure(text=f"Processando 0 de {len(todo)}...")
+            dests = {f: self._dest(f) for f in todo}
+
+            def work(f):
+                self.q.put(("start", f))
+                try:
+                    r = optimize_file(f, dests[f], target, keep)
+                    self.q.put(("ok", f, r))
+                except Exception as e:  # noqa
+                    self.q.put(("err", f, str(e)))
+
+            def runner():
+                workers = max(1, (os.cpu_count() or 2) - 1)
+                with ThreadPoolExecutor(max_workers=workers) as ex:
+                    list(ex.map(work, todo))
+                self.q.put(("end",))
+
+            threading.Thread(target=runner, daemon=True).start()
+
+        def _poll(self):
             try:
-                root.after(0, lambda: tree.set(iid, "status", "Otimizando..."))
-                b, a, q, s = optimize_file(f, dest(f), target, keep.get())
-                with lock:
-                    acc["b"] += b
-                    acc["a"] += a
-                st = "Ja otimizado" if q == 0 else f"OK (SSIM {s:.3f})"
-                root.after(0, lambda: tree.item(iid, values=(
-                    f.name, human(b), human(a), f"-{100 * (1 - a / b):.0f}%", q or "-", st)))
-            except Exception as e:  # noqa
-                root.after(0, lambda: tree.set(iid, "status", f"Erro: {e}"))
-            root.after(0, lambda: bar.step(1))
+                while True:
+                    m = self.q.get_nowait()
+                    kind = m[0]
+                    if kind == "start":
+                        self.tree.set(str(m[1]), "status", "Otimizando...")
+                    elif kind == "ok":
+                        f, (b, a, qv, _s) = m[1], m[2]
+                        self.acc["b"] += b
+                        self.acc["a"] += a
+                        self.done.add(f)
+                        eco = f"-{100 * (1 - a / b):.0f}%" if a < b else "0%"
+                        st = "Já otimizada" if qv == 0 else f"Concluída (q{qv})"
+                        self.tree.item(str(f), values=(f.name, human(b), human(a), eco, st),
+                                       tags=("ok",))
+                        self._tick()
+                    elif kind == "err":
+                        self.tree.set(str(m[1]), "status", "Erro")
+                        self.tree.item(str(m[1]), tags=("err",))
+                        self._tick()
+                    elif kind == "end":
+                        self.running = False
+                        self.btn.configure(state="normal", text="Otimizar")
+                        b, a = self.acc["b"], self.acc["a"]
+                        if b:
+                            self.summary.configure(
+                                text=f"Pronto!  {human(b)} → {human(a)}  "
+                                     f"(economia de {human(b - a)}, -{100 * (1 - a / b):.0f}%)",
+                                text_color=GREEN)
+                        self._update_count()
+            except queue.Empty:
+                pass
+            self.after(100, self._poll)
 
-        def runner():
-            with ThreadPoolExecutor(max_workers=max(1, (os.cpu_count() or 2) - 1)) as ex:
-                list(ex.map(work, list(files)))
-            def done():
-                state["running"] = False
-                if acc["b"]:
-                    total_lbl.config(
-                        text=f"Total: {human(acc['b'])} -> {human(acc['a'])} "
-                             f"(-{100 * (1 - acc['a'] / acc['b']):.0f}%)")
-            root.after(0, done)
+        def _tick(self):
+            self.total_done += 1
+            self.progress.set(self.total_done / max(1, self.total_todo))
+            self.summary.configure(
+                text=f"Processando {self.total_done} de {self.total_todo}...",
+                text_color=TEXT_DIM)
 
-        threading.Thread(target=runner, daemon=True).start()
+    return App()
 
-    ttk.Button(root, text="Otimizar", command=start).pack(pady=6)
-    root.mainloop()
+
+def run_gui():
+    app = build_app()
+    app.mainloop()
 
 
 def main():
