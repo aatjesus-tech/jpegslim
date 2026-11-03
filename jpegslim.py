@@ -13,6 +13,7 @@ Dependencias: pip install pillow numpy
 """
 import argparse
 import io
+import json
 import os
 import shutil
 import sys
@@ -143,6 +144,40 @@ def human(n):
     return f"{n:.1f} TB"
 
 
+# --------------------------------------------------------- estatisticas ----
+def stats_file():
+    base = os.environ.get("APPDATA") or str(Path.home() / ".config")
+    return Path(base) / "JPEGSlim" / "stats.json"
+
+
+def load_stats():
+    try:
+        d = json.loads(stats_file().read_text(encoding="utf-8"))
+        return {"saved": int(d.get("saved", 0)), "photos": int(d.get("photos", 0))}
+    except Exception:
+        return {"saved": 0, "photos": 0}
+
+
+def save_stats(st):
+    try:
+        p = stats_file()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(st), encoding="utf-8")
+        os.replace(tmp, p)
+    except Exception:
+        pass  # nunca deixa uma falha de gravacao atrapalhar a otimizacao
+
+
+def human_total(n):
+    """Formata o acumulado: KB, MB e depois GB com 2 casas."""
+    if n < 1024 ** 2:
+        return f"{n / 1024:.0f} KB"
+    if n < 1024 ** 3:
+        return f"{n / 1024 ** 2:.1f} MB"
+    return f"{n / 1024 ** 3:.2f} GB"
+
+
 # ------------------------------------------------------------------ CLI ----
 def run_cli(args):
     files = collect(args.input)
@@ -212,8 +247,8 @@ def build_app():
         def __init__(self):
             super().__init__()
             self.title("JPEGSlim")
-            self.geometry("900x700")
-            self.minsize(780, 620)
+            self.geometry("900x720")
+            self.minsize(760, 560)
             self.configure(fg_color=BG)
 
             self.files = []          # Path
@@ -221,6 +256,7 @@ def build_app():
             self.out_dir = None
             self.running = False
             self.q = queue.Queue()
+            self.stats = load_stats()
             self.acc = {"b": 0, "a": 0}
             self.total_todo = 0
             self.total_done = 0
@@ -237,6 +273,20 @@ def build_app():
             ctk.CTkLabel(head, text="  Fotos mais leves, sem perda visível",
                          font=ctk.CTkFont(size=14), text_color=TEXT_DIM).pack(
                 side="left", pady=(10, 0))
+
+            # total acumulado (persistente entre execucoes)
+            tot = ctk.CTkFrame(head, fg_color=CARD, corner_radius=12)
+            tot.pack(side="right")
+            ctk.CTkLabel(tot, text="TOTAL ECONOMIZADO", text_color=TEXT_DIM,
+                         font=ctk.CTkFont(size=10, weight="bold")).pack(
+                padx=16, pady=(8, 0))
+            self.total_lbl = ctk.CTkLabel(tot, text="0 KB", text_color=GREEN,
+                                          font=ctk.CTkFont(size=22, weight="bold"))
+            self.total_lbl.pack(padx=16)
+            self.total_sub = ctk.CTkLabel(tot, text="", text_color=TEXT_DIM,
+                                          font=ctk.CTkFont(size=11))
+            self.total_sub.pack(padx=16, pady=(0, 8))
+            self._refresh_total()
 
             # zona de soltar
             self.zone = ctk.CTkFrame(self, fg_color=CARD, corner_radius=18,
@@ -281,12 +331,17 @@ def build_app():
                             foreground=TEXT_DIM, borderwidth=0, relief="flat",
                             font=("Segoe UI", 9, "bold"))
             style.map("J.Treeview", background=[("selected", "#2a2f45")])
+            style.configure("J.Treeview", bordercolor=CARD, lightcolor=CARD,
+                            darkcolor=CARD)
+            style.layout("J.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
             style.map("J.Treeview.Heading", background=[("active", CARD_2)])
-            style.configure("Vertical.TScrollbar", background=CARD_2,
-                            troughcolor=CARD, borderwidth=0, arrowcolor=TEXT_DIM)
+            style.configure("Vertical.TScrollbar", background="#2a3045",
+                            troughcolor=CARD, borderwidth=0, arrowcolor=TEXT_DIM,
+                            bordercolor=CARD, lightcolor="#2a3045", darkcolor="#2a3045")
+            style.map("Vertical.TScrollbar", background=[("active", "#3a4260")])
             cols = ("nome", "antes", "depois", "eco", "status")
             self.tree = ttk.Treeview(box, columns=cols, show="headings",
-                                     style="J.Treeview", selectmode="extended")
+                                     style="J.Treeview", selectmode="extended", height=4)
             heads = (("nome", "Arquivo", 330, "w"), ("antes", "Antes", 90, "center"),
                      ("depois", "Depois", 90, "center"),
                      ("eco", "Economia", 90, "center"), ("status", "Status", 170, "center"))
@@ -303,7 +358,8 @@ def build_app():
 
             # opcoes
             opt = ctk.CTkFrame(self, fg_color=CARD, corner_radius=14)
-            opt.pack(fill="x", padx=28, pady=(0, 8))
+            opt.pack(side="bottom", before=box, fill="x", padx=28, pady=(0, 8))
+            self._opt = opt
             ctk.CTkLabel(opt, text="Qualidade", text_color=TEXT_DIM).grid(
                 row=0, column=0, padx=(16, 8), pady=(12, 0), sticky="w")
             ctk.CTkLabel(opt, text="Saída", text_color=TEXT_DIM).grid(
@@ -326,7 +382,7 @@ def build_app():
 
             # rodape
             foot = ctk.CTkFrame(self, fg_color="transparent")
-            foot.pack(fill="x", padx=28, pady=(0, 22))
+            foot.pack(side="bottom", before=self._opt, fill="x", padx=28, pady=(0, 18))
             left = ctk.CTkFrame(foot, fg_color="transparent")
             left.pack(side="left", fill="x", expand=True)
             self.progress = ctk.CTkProgressBar(left, progress_color=ACCENT, height=10)
@@ -347,6 +403,12 @@ def build_app():
                     w.dnd_bind("<<Drop>>", self._on_drop)
                     w.dnd_bind("<<DropEnter>>", lambda e: self.zone.configure(fg_color=CARD_2))
                     w.dnd_bind("<<DropLeave>>", lambda e: self.zone.configure(fg_color=CARD))
+
+        def _refresh_total(self):
+            self.total_lbl.configure(text=human_total(self.stats["saved"]))
+            n = self.stats["photos"]
+            self.total_sub.configure(text=f"em {n} foto(s) otimizada(s)" if n else
+                                     "desde a primeira vez que usou")
 
         # ------------------------------------------------------- fila ----
         def _on_drop(self, event):
@@ -482,6 +544,11 @@ def build_app():
                         self.acc["b"] += b
                         self.acc["a"] += a
                         self.done.add(f)
+                        if a < b:
+                            self.stats["saved"] += b - a
+                            self.stats["photos"] += 1
+                            save_stats(self.stats)
+                            self._refresh_total()
                         eco = f"-{100 * (1 - a / b):.0f}%" if a < b else "0%"
                         st = "Já otimizada" if qv == 0 else f"Concluída (q{qv})"
                         self.tree.item(str(f), values=(f.name, human(b), human(a), eco, st),
