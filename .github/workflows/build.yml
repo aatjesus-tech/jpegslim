@@ -19,7 +19,7 @@ jobs:
         run: python -m pip install -r requirements.txt
 
       - name: Gerar executavel
-        run: python -m PyInstaller --onefile --windowed --name JPEGSlim jpegslim.py
+        run: python -m PyInstaller --onefile --windowed --name JPEGSlim --collect-all customtkinter --collect-all tkinterdnd2 jpegslim.py
 
       - uses: actions/upload-artifact@v4
         with:
