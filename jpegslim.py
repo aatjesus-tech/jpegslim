@@ -35,6 +35,12 @@ JPEG_EXT = {".jpg", ".jpeg", ".jpe"}
 MIN_Q, MAX_Q = 45, 95
 
 
+def resource_path(name):
+    """Caminho de um arquivo empacotado (funciona no .exe e rodando o .py)."""
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, name)
+
+
 # ----------------------------------------------------------------- SSIM ----
 def _box(x, w):
     c = np.cumsum(np.cumsum(x, axis=0, dtype=np.float64), axis=1)
@@ -168,7 +174,10 @@ def human(n):
 
 # --------------------------------------------------------- estatisticas ----
 def stats_file():
-    base = os.environ.get("APPDATA") or str(Path.home() / ".config")
+    if sys.platform == "darwin":
+        base = str(Path.home() / "Library" / "Application Support")
+    else:
+        base = os.environ.get("APPDATA") or str(Path.home() / ".config")
     return Path(base) / "JPEGSlim" / "stats.json"
 
 
@@ -272,6 +281,14 @@ def build_app():
             self.geometry("900x720")
             self.minsize(760, 560)
             self.configure(fg_color=BG)
+            ico = resource_path("icone.ico")
+            if os.path.exists(ico):
+                try:
+                    self.iconbitmap(ico)
+                    # o CustomTkinter troca o icone logo apos abrir; reaplica depois
+                    self.after(250, lambda: self.iconbitmap(ico))
+                except Exception:
+                    pass
 
             self.files = []          # Path
             self.done = set()        # Path ja processados
