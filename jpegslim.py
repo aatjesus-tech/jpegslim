@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 JPEGSlim - otimizador de JPEG com qualidade perceptual controlada.
+Desenvolvido por Ari Teles.
 
 Para cada foto, procura o MENOR 'quality' do JPEG cujo resultado ainda tenha
 SSIM >= alvo em relacao ao original. Preserva EXIF, perfil ICC e orientacao.
@@ -70,17 +71,37 @@ def ssim(a: Image.Image, b: Image.Image, w: int = 7, strip: int = 512) -> float:
 
 
 # ------------------------------------------------------------ otimizacao ----
-def _encode(img, q, exif, icc, subsampling):
+def _encode(img, q, exif=None, icc=None, final=False):
+    """final=True usa progressive+optimize (arquivo menor, mais lento).
+    Esses dois modos NAO alteram os pixels, entao a busca usa o modo rapido."""
     buf = io.BytesIO()
-    kw = dict(format="JPEG", quality=q, optimize=True, progressive=True)
+    kw = dict(format="JPEG", quality=q, optimize=final, progressive=final)
     if exif:
         kw["exif"] = exif
     if icc:
         kw["icc_profile"] = icc
-    if subsampling is not None:
-        kw["subsampling"] = subsampling
     img.save(buf, **kw)
     return buf.getvalue()
+
+
+TILE = 256   # multiplo de 16: os blocos JPEG ficam alinhados, entao
+GRID = (6, 5)  # codificar so as amostras da o mesmo resultado que a foto inteira
+
+
+def _sample_mosaic(img):
+    """Monta um mosaico com recortes espalhados pela foto (grade regular).
+    O erro do JPEG e local (blocos 8x8), entao a media do mosaico representa a foto."""
+    w, h = img.size
+    gx, gy = GRID
+    if w < TILE * gx or h < TILE * gy:
+        return img  # foto pequena: usa inteira
+    mosaic = Image.new(img.mode, (TILE * gx, TILE * gy))
+    for j in range(gy):
+        for i in range(gx):
+            x = int((w - TILE) * (i + 0.5) / gx) // 16 * 16
+            y = int((h - TILE) * (j + 0.5) / gy) // 16 * 16
+            mosaic.paste(img.crop((x, y, x + TILE, y + TILE)), (i * TILE, j * TILE))
+    return mosaic
 
 
 def optimize_file(src, dst, target=0.985, keep_metadata=True):
@@ -91,28 +112,29 @@ def optimize_file(src, dst, target=0.985, keep_metadata=True):
         im.load()
         exif = im.info.get("exif") if keep_metadata else None
         icc = im.info.get("icc_profile") if keep_metadata else None
-        if im.mode not in ("RGB", "L"):
-            im = im.convert("RGB")
-        orig = im.copy()
+        orig = im if im.mode in ("RGB", "L") else im.convert("RGB")
+        orig.load()
 
-    # Busca binaria: menor q com ssim >= alvo
-    lo, hi = MIN_Q, MAX_Q
-    best = None  # (q, data, s)
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        data = _encode(orig, mid, exif, icc, None)
-        dec = Image.open(io.BytesIO(data))
-        s = ssim(orig, dec)
-        if s >= target:
-            best = (mid, data, s)
-            hi = mid - 1
-        else:
-            lo = mid + 1
-    if best is None:  # nem MAX_Q atinge o alvo: usa o maximo
-        data = _encode(orig, MAX_Q, exif, icc, None)
-        best = (MAX_Q, data, ssim(orig, Image.open(io.BytesIO(data))))
+        # Busca binaria do menor q com ssim >= alvo, so nas amostras
+        probe = _sample_mosaic(orig)
+        lo, hi, best_q, best_s = MIN_Q, MAX_Q, None, 0.0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            dec = Image.open(io.BytesIO(_encode(probe, mid)))
+            s = ssim(probe, dec)
+            if s >= target:
+                best_q, best_s = mid, s
+                hi = mid - 1
+            else:
+                lo = mid + 1
+        if best_q is None:  # nem o maximo atinge o alvo
+            best_q = MAX_Q
+            best_s = ssim(probe, Image.open(io.BytesIO(_encode(probe, MAX_Q))))
 
-    q, data, s = best
+        # Uma unica codificacao completa
+        data = _encode(orig, best_q, exif, icc, final=True)
+
+    q, s = best_q, best_s
     dst.parent.mkdir(parents=True, exist_ok=True)
     if len(data) >= before:
         # Ja estava bem comprimido: nao piora, copia o original.
@@ -246,7 +268,7 @@ def build_app():
 
         def __init__(self):
             super().__init__()
-            self.title("JPEGSlim")
+            self.title("JPEGSlim - Desenvolvido por Ari Teles")
             self.geometry("900x720")
             self.minsize(760, 560)
             self.configure(fg_color=BG)
@@ -268,11 +290,17 @@ def build_app():
         def _build_ui(self):
             head = ctk.CTkFrame(self, fg_color="transparent")
             head.pack(fill="x", padx=28, pady=(22, 8))
-            ctk.CTkLabel(head, text="JPEGSlim",
+            title = ctk.CTkFrame(head, fg_color="transparent")
+            title.pack(side="left")
+            row = ctk.CTkFrame(title, fg_color="transparent")
+            row.pack(anchor="w")
+            ctk.CTkLabel(row, text="JPEGSlim",
                          font=ctk.CTkFont(size=28, weight="bold")).pack(side="left")
-            ctk.CTkLabel(head, text="  Fotos mais leves, sem perda visível",
-                         font=ctk.CTkFont(size=14), text_color=TEXT_DIM).pack(
-                side="left", pady=(10, 0))
+            ctk.CTkLabel(row, text="  Desenvolvido por Ari Teles",
+                         font=ctk.CTkFont(size=13, weight="bold"),
+                         text_color=ACCENT).pack(side="left", pady=(10, 0))
+            ctk.CTkLabel(title, text="Fotos mais leves, sem perda visível",
+                         font=ctk.CTkFont(size=13), text_color=TEXT_DIM).pack(anchor="w")
 
             # total acumulado (persistente entre execucoes)
             tot = ctk.CTkFrame(head, fg_color=CARD, corner_radius=12)
